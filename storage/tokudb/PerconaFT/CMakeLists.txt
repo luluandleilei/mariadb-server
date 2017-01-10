@@ -81,7 +81,7 @@ add_subdirectory(ftcxx)
 add_subdirectory(tools)
 
 INSTALL_DOCUMENTATION(README.md COPYING.AGPLv3 COPYING.GPLv2 PATENTS
-  COMPONENT Server)
+  COMPONENT Server SUBDIR TokuDB-PerconaFT)
 
 ## build tags
 #include(TokuBuildTagDatabases)
