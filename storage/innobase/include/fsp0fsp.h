@@ -860,6 +860,9 @@ fsp_flags_convert_from_101(ulint flags)
 	}
 
 	if (flags >> 18) {
+		/* The most significant FSP_SPACE_FLAGS bit that was ever set
+		by MariaDB 10.1.0 to 10.1.20 was bit 17 (misplaced DATA_DIR flag).
+		The flags must be less than 1<<18 in order to be valid. */
 		return(ULINT_UNDEFINED);
 	}
 
