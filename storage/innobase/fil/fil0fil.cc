@@ -644,12 +644,10 @@ fil_node_open_file(
 
 		if (size_bytes < FIL_IBD_FILE_INITIAL_SIZE * UNIV_PAGE_SIZE) {
 			ib_logf(IB_LOG_LEVEL_ERROR,
-				"the size file %s is only " UINT64PF ","
-				" should be at least %lu!\n",
-				node->name,
-				size_bytes,
-				(ulong) (FIL_IBD_FILE_INITIAL_SIZE
-					 * UNIV_PAGE_SIZE));
+				"The size of the file %s is only " UINT64PF
+				" bytes, should be at least " ULINTPF,
+				node->name, size_bytes,
+				FIL_IBD_FILE_INITIAL_SIZE * UNIV_PAGE_SIZE);
 			os_file_close(node->handle);
 			return(false);
 		}
@@ -674,10 +672,10 @@ fil_node_open_file(
 			ulint cflags = fsp_flags_convert_from_101(flags);
 			if (cflags == ULINT_UNDEFINED) {
 				ib_logf(IB_LOG_LEVEL_ERROR,
-					"Expected flags are 0x%x"
-					" but the flags in file %s are 0x%x!\n",
-					int(space->flags), node->name,
-					int(flags));
+					"Expected tablespace flags 0x%x"
+					" but found 0x%x in the file %s",
+					int(space->flags), int(flags),
+					node->name);
 				return(false);
 			}
 
