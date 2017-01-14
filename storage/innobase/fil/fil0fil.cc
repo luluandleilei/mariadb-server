@@ -664,7 +664,7 @@ retry:
 too_small:
 			ib::error() << "The size of the file "
 				<< node->name << " is only " << size_bytes
-				<< ", should be at least " << min_size << "!";
+				<< " bytes, should be at least " << min_size;
 			return(false);
 		}
 
@@ -698,11 +698,11 @@ too_small:
 		if (!fsp_flags_is_valid(flags)) {
 			ulint cflags = fsp_flags_convert_from_101(flags);
 			if (cflags == ULINT_UNDEFINED) {
-				ib::error() << "Expected flags "
+				ib::error() << "Expected tablespace flags "
 					<< ib::hex(space->flags)
-					<< " but the flags in file "
-					<< node->name << " are "
-					<< ib::hex(flags) << "!";
+					<< " but found "
+					<< ib::hex(flags)
+					<< "in the file " << node->name;
 				return(false);
 			}
 
