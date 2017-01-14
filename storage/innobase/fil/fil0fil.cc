@@ -612,11 +612,6 @@ fil_node_open_file(
 {
 	os_offset_t	size_bytes;
 	bool		success;
-	byte*		buf2;
-	byte*		page;
-	ulint		flags;
-	ulint		min_size;
-	ulint		space_id;
 	bool		read_only_mode;
 	fil_space_t*	space = node->space;
 
@@ -663,13 +658,23 @@ retry:
 
 		ut_a(space->purpose != FIL_TYPE_LOG);
 
+		ulint	min_size = UNIV_PAGE_SIZE;
+		if (size_bytes < min_size) {
+			os_file_close(node->handle);
+too_small:
+			ib::error() << "The size of the file "
+				<< node->name << " is only " << size_bytes
+				<< ", should be at least " << min_size << "!";
+			return(false);
+		}
+
 		/* Read the first page of the tablespace */
 
-		buf2 = static_cast<byte*>(ut_malloc_nokey(2 * UNIV_PAGE_SIZE));
+		byte*	buf2 = static_cast<byte*>(
+			ut_malloc_nokey(2 * min_size));
 
-		/* Align the memory for file i/o if we might have O_DIRECT
-		set */
-		page = static_cast<byte*>(ut_align(buf2, UNIV_PAGE_SIZE));
+		/* Align the memory for possible O_DIRECT file i/o */
+		page_t*	page = static_cast<byte*>(ut_align(buf2, min_size));
 		ut_ad(page == page_align(page));
 
 		IORequest	request(IORequest::READ);
@@ -679,73 +684,53 @@ retry:
 			node->handle, page, 0, UNIV_PAGE_SIZE);
 		srv_stats.page0_read.add(1);
 
-		space_id = fsp_header_get_space_id(page);
-		flags = fsp_header_get_flags(page);
+		const ulint space_id = fsp_header_get_space_id(page);
+		ulint flags = fsp_header_get_flags(page);
+		const ulint size = fsp_header_get_field(page, FSP_SIZE);
+		const ulint free_limit = fsp_header_get_field(
+			page, FSP_FREE_LIMIT);
+		const ulint free_len = flst_get_len(
+			FSP_HEADER_OFFSET + FSP_FREE + page);
 
-		/* Close the file now that we have read the space id from it */
-
+		ut_free(buf2);
 		os_file_close(node->handle);
+
+		if (!fsp_flags_is_valid(flags)) {
+			ulint cflags = fsp_flags_convert_from_101(flags);
+			if (cflags == ULINT_UNDEFINED) {
+				ib::error() << "Expected flags "
+					<< ib::hex(space->flags)
+					<< " but the flags in file "
+					<< node->name << " are "
+					<< ib::hex(flags) << "!";
+				return(false);
+			}
+
+			flags = cflags;
+		}
 
 		const page_size_t	page_size(flags);
 
 		min_size = FIL_IBD_FILE_INITIAL_SIZE * page_size.physical();
-
 		if (size_bytes < min_size) {
-
-			ib::error() << "The size of tablespace " << space_id << " file "
-				<< node->name << " is only " << size_bytes
-				<< ", should be at least " << min_size << "!";
-
-			ut_error;
+			goto too_small;
 		}
 
-		if (space->flags != flags) {
-			ulint sflags = (space->flags & ~FSP_FLAGS_MASK_DATA_DIR);
-			ulint fflags = (flags & ~FSP_FLAGS_MASK_DATA_DIR_ORACLE);
-
-			/* DATA_DIR option is on different place on MariaDB
-			compared to MySQL. If this is the difference. Fix
-			it. */
-
-			if (sflags == fflags) {
-				ib::warn()
-					<< "Tablespace " << space_id
-					<< " flags " << space->flags
-					<< " in the data dictionary but in file " << node->name
-					<< " are " << flags
-					<< ". Temporally corrected because DATA_DIR option to "
-					<< space->flags;
-
-				flags = space->flags;
-			} else {
-				ib::fatal()
-					<< "Table flags are "
-					<< ib::hex(space->flags) << " in the data"
-					" dictionary but the flags in file "
-					<< node->name << " are " << ib::hex(flags)
-					<< "!";
-			}
+		if (UNIV_UNLIKELY(space_id != space->id)) {
+			ib::error() << "Expected tablespace id "
+				    << space->id << " but found "
+				    << space_id << " in the file "
+				    << node->name;
+			return(false);
 		}
 
-
-		{
-			ulint	size		= fsp_header_get_field(
-				page, FSP_SIZE);
-			ulint	free_limit	= fsp_header_get_field(
-				page, FSP_FREE_LIMIT);
-			ulint	free_len	= flst_get_len(
-				FSP_HEADER_OFFSET + FSP_FREE + page);
-
-			ut_ad(space->free_limit == 0
-			      || space->free_limit == free_limit);
-			ut_ad(space->free_len == 0
-			      || space->free_len == free_len);
-			space->size_in_header = size;
-			space->free_limit = free_limit;
-			space->free_len = free_len;
-		}
-
-		ut_free(buf2);
+		ut_ad(space->free_limit == 0
+		      || space->free_limit == free_limit);
+		ut_ad(space->free_len == 0
+		      || space->free_len == free_len);
+		space->size_in_header = size;
+		space->free_limit = free_limit;
+		space->free_len = free_len;
 
 #ifdef MYSQL_ENCRYPTION
 		/* For encrypted tablespace, we need to check the
@@ -1617,7 +1602,7 @@ fil_space_create(
 	fil_space_t*	space;
 
 	ut_ad(fil_system);
-	ut_ad(fsp_flags_is_valid(flags));
+	ut_ad(fsp_flags_is_valid(flags & ~FSP_FLAGS_MEM_MASK));
 	ut_ad(srv_page_size == UNIV_PAGE_SIZE_ORIG || flags != 0);
 
 	DBUG_EXECUTE_IF("fil_space_create_failure", return(NULL););
@@ -2402,6 +2387,7 @@ fil_op_write_log(
 	ulint		len;
 
 	ut_ad(first_page_no == 0);
+	ut_ad(fsp_flags_is_valid(flags));
 
 	/* fil_name_parse() requires that there be at least one path
 	separator and that the file path end with ".ibd". */
@@ -3148,11 +3134,6 @@ fil_delete_tablespace(
 	if (FSP_FLAGS_HAS_DATA_DIR(space->flags)) {
 
 		RemoteDatafile::delete_link_file(space->name);
-
-	} else if (FSP_FLAGS_GET_SHARED(space->flags)) {
-
-		RemoteDatafile::delete_link_file(base_name(path));
-
 	}
 
 	mutex_enter(&fil_system->mutex);
@@ -3788,9 +3769,7 @@ fil_ibd_create(
 	byte*		buf2;
 	byte*		page;
 	bool		success;
-	bool		is_temp = FSP_FLAGS_GET_TEMPORARY(flags);
-	bool		has_data_dir = FSP_FLAGS_HAS_DATA_DIR(flags);
-	bool		has_shared_space = FSP_FLAGS_GET_SHARED(flags);
+	bool		has_data_dir = FSP_FLAGS_HAS_DATA_DIR(flags) != 0;
 	fil_space_t*	space = NULL;
 	fil_space_crypt_t *crypt_data = NULL;
 
@@ -3798,15 +3777,13 @@ fil_ibd_create(
 	ut_ad(!srv_read_only_mode);
 	ut_a(space_id < SRV_LOG_SPACE_FIRST_ID);
 	ut_a(size >= FIL_IBD_FILE_INITIAL_SIZE);
-	ut_a(fsp_flags_is_valid(flags));
+	ut_a(fsp_flags_is_valid(flags & ~FSP_FLAGS_MEM_MASK));
 
 	/* Create the subdirectories in the path, if they are
 	not there already. */
-	if (!has_shared_space) {
-		err = os_file_create_subdirs_if_needed(path);
-		if (err != DB_SUCCESS) {
-			return(err);
-		}
+	err = os_file_create_subdirs_if_needed(path);
+	if (err != DB_SUCCESS) {
+		return(err);
 	}
 
 	file = os_file_create(
@@ -3919,10 +3896,7 @@ fil_ibd_create(
 
 	memset(page, '\0', UNIV_PAGE_SIZE);
 
-	/* Add the UNIV_PAGE_SIZE to the table flags and write them to the
-	tablespace header. */
-	flags = fsp_flags_set_page_size(flags, univ_page_size);
-
+	flags |= FSP_FLAGS_PAGE_SSIZE();
 	fsp_header_init_fields(page, space_id, flags);
 	mach_write_to_4(page + FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID, space_id);
 
@@ -3987,11 +3961,10 @@ fil_ibd_create(
 		return(DB_ERROR);
 	}
 
-	if (has_data_dir || has_shared_space) {
+	if (has_data_dir) {
 		/* Make the ISL file if the IBD file is not
 		in the default location. */
-		err = RemoteDatafile::create_link_file(name, path,
-						       has_shared_space);
+		err = RemoteDatafile::create_link_file(name, path);
 		if (err != DB_SUCCESS) {
 			os_file_close(file);
 			os_file_delete(innodb_data_file_key, path);
@@ -4006,56 +3979,36 @@ fil_ibd_create(
 		crypt_data = fil_space_create_crypt_data(mode, key_id);
 	}
 
-	space = fil_space_create(name, space_id, flags, is_temp
-		? FIL_TYPE_TEMPORARY : FIL_TYPE_TABLESPACE,
-		crypt_data, true);
+	space = fil_space_create(name, space_id, flags,
+				 /* FIXME: Merge WL#7899 */
+				 FIL_TYPE_TABLESPACE, crypt_data, true);
 
 	if (!fil_node_create_low(
 			path, size, space, false, punch_hole, TRUE)) {
 
-		if (crypt_data) {
-			free(crypt_data);
-		}
-
+		free(crypt_data);
 		err = DB_ERROR;
-		goto error_exit_1;
-	}
+	} else {
+		mtr_t	mtr;
+		const	fil_node_t*	file = UT_LIST_GET_FIRST(space->chain);
 
-#ifdef MYSQL_ENCRYPTION
-	/* For encryption tablespace, initial encryption information. */
-	if (FSP_FLAGS_GET_ENCRYPTION(space->flags)) {
-		err = fil_set_encryption(space->id,
-					 Encryption::AES,
-					 NULL,
-					 NULL);
-		ut_ad(err == DB_SUCCESS);
-	}
-#endif /* MYSQL_ENCRYPTION */
-
-	if (!is_temp) {
-		mtr_t			mtr;
-		const fil_node_t*	file = UT_LIST_GET_FIRST(space->chain);
-
-		mtr_start(&mtr);
+		mtr.start();
 		fil_op_write_log(
 			MLOG_FILE_CREATE2, space_id, 0, file->name,
-			NULL, space->flags, &mtr);
+			NULL, space->flags & ~FSP_FLAGS_MEM_MASK, &mtr);
 		fil_name_write(space, 0, file, &mtr);
-		mtr_commit(&mtr);
-	}
+		mtr.commit();
 
-	err = DB_SUCCESS;
-
-	/* Error code is set.  Cleanup the various variables used.
-	These labels reflect the order in which variables are assigned or
-	actions are done. */
-error_exit_1:
-	if (err != DB_SUCCESS && (has_data_dir || has_shared_space)) {
-		RemoteDatafile::delete_link_file(name);
+		err = DB_SUCCESS;
 	}
 
 	os_file_close(file);
+
 	if (err != DB_SUCCESS) {
+		if (has_data_dir) {
+			RemoteDatafile::delete_link_file(name);
+		}
+
 		os_file_delete(innodb_data_file_key, path);
 	}
 
@@ -4106,14 +4059,11 @@ fil_ibd_open(
 	bool		dict_filepath_same_as_default = false;
 	bool		link_file_found = false;
 	bool		link_file_is_bad = false;
-	bool		is_shared = FSP_FLAGS_GET_SHARED(flags);
-	bool		is_encrypted = FSP_FLAGS_GET_ENCRYPTION(flags);
 	Datafile	df_default;	/* default location */
 	Datafile	df_dict;	/* dictionary location */
 	RemoteDatafile	df_remote;	/* remote location */
 	ulint		tablespaces_found = 0;
 	ulint		valid_tablespaces_found = 0;
-	bool		for_import = (purpose == FIL_TYPE_IMPORT);
 
 	ut_ad(!fix_dict || rw_lock_own(dict_operation_lock, RW_LOCK_X));
 
@@ -4122,10 +4072,13 @@ fil_ibd_open(
 	ut_ad(!fix_dict || srv_log_file_size != 0);
 	ut_ad(fil_type_is_data(purpose));
 
-	if (!fsp_flags_is_valid(flags)) {
+	/* Table flags can be ULINT_UNDEFINED if
+	dict_tf_to_fsp_flags_failure is set. */
+	if (flags == ULINT_UNDEFINED) {
 		return(DB_CORRUPTION);
 	}
 
+	ut_ad(fsp_flags_is_valid(flags & ~FSP_FLAGS_MEM_MASK));
 	df_default.init(space_name, flags);
 	df_dict.init(space_name, flags);
 	df_remote.init(space_name, flags);
@@ -4133,25 +4086,8 @@ fil_ibd_open(
 	/* Discover the correct file by looking in three possible locations
 	while avoiding unecessary effort. */
 
-	if (is_shared) {
-		/* Shared tablespaces will have a path_in since the filename
-		is not generated from the tablespace name. Use the basename
-		from this path_in with the default datadir as a filepath to
-		the default location */
-		ut_a(path_in);
-		const char*	sep = strrchr(path_in, OS_PATH_SEPARATOR);
-		const char*	basename = (sep == NULL) ? path_in : &sep[1];
-		df_default.make_filepath(NULL, basename, IBD);
-
-		/* Always validate shared tablespaces. */
-		validate = true;
-
-		/* Set the ISL filepath in the default location. */
-		df_remote.set_link_filepath(path_in);
-	} else {
-		/* We will always look for an ibd in the default location. */
-		df_default.make_filepath(NULL, space_name, IBD);
-	}
+	/* We will always look for an ibd in the default location. */
+	df_default.make_filepath(NULL, space_name, IBD);
 
 	/* Look for a filepath embedded in an ISL where the default file
 	would be. */
@@ -4226,45 +4162,31 @@ fil_ibd_open(
 	/*  We have now checked all possible tablespace locations and
 	have a count of how many unique files we found.  If things are
 	normal, we only found 1. */
-	/* For encrypted tablespace, we need to check the
-	encryption in header of first page. */
-	if (!validate && tablespaces_found == 1 && !is_encrypted) {
+	if (!validate && tablespaces_found == 1) {
 		goto skip_validate;
 	}
 
 	/* Read and validate the first page of these three tablespace
 	locations, if found. */
 	valid_tablespaces_found +=
-		(df_remote.validate_to_dd(id, flags, for_import)
-			== DB_SUCCESS) ? 1 : 0;
+		(df_remote.validate_to_dd(id, flags) == DB_SUCCESS);
 
 	valid_tablespaces_found +=
-		(df_default.validate_to_dd(id, flags, for_import)
-			== DB_SUCCESS) ? 1 : 0;
+		(df_default.validate_to_dd(id, flags) == DB_SUCCESS);
 
 	valid_tablespaces_found +=
-		(df_dict.validate_to_dd(id, flags, for_import)
-			== DB_SUCCESS) ? 1 : 0;
+		(df_dict.validate_to_dd(id, flags) == DB_SUCCESS);
 
 	/* Make sense of these three possible locations.
 	First, bail out if no tablespace files were found. */
 	if (valid_tablespaces_found == 0) {
-		if (!is_encrypted) {
-			/* The following call prints an error message.
-			For encrypted tablespace we skip print, since it should
-			be keyring plugin issues. */
-			os_file_get_last_error(true);
-			ib::error() << "Could not find a valid tablespace file for `"
-				<< space_name << "`. " << TROUBLESHOOT_DATADICT_MSG;
-		}
-
+		os_file_get_last_error(true);
+		ib::error() << "Could not find a valid tablespace file for `"
+			<< space_name << "`. " << TROUBLESHOOT_DATADICT_MSG;
 		return(DB_CORRUPTION);
 	}
-	if (!validate && !is_encrypted) {
-		return(DB_SUCCESS);
-	}
-	if (validate && is_encrypted && fil_space_get(id)) {
-		return(DB_SUCCESS);
+	if (!validate) {
+		goto skip_validate;
 	}
 
 	/* Do not open any tablespaces if more than one tablespace with
@@ -4370,8 +4292,7 @@ fil_ibd_open(
 				RemoteDatafile::delete_link_file(space_name);
 			}
 
-		} else if (!is_shared
-			   && (!link_file_found || link_file_is_bad)) {
+		} else if (!link_file_found || link_file_is_bad) {
 			ut_ad(df_dict.is_open());
 			/* Fix the link file if we got our filepath
 			from the dictionary but a link file did not
@@ -4429,24 +4350,9 @@ skip_validate:
 			err = DB_ERROR;
 		}
 
-#ifdef MYSQL_ENCRYPTION
-		/* For encryption tablespace, initialize encryption
-		information.*/
-		if (err == DB_SUCCESS && is_encrypted && !for_import) {
-			Datafile& df_current = df_remote.is_open() ?
-				df_remote: df_dict.is_open() ?
-				df_dict : df_default;
-
-			byte*	key = df_current.m_encryption_key;
-			byte*	iv = df_current.m_encryption_iv;
-			ut_ad(key && iv);
-
-			err = fil_set_encryption(space->id, Encryption::AES,
-						 key, iv);
-			ut_ad(err == DB_SUCCESS);
+		if (purpose != FIL_TYPE_IMPORT && !srv_read_only_mode) {
+			fsp_flags_try_adjust(id, flags & ~FSP_FLAGS_MEM_MASK);
 		}
-#endif /* MYSQL_ENCRYPTION */
-
 	}
 
 	return(err);
@@ -4554,24 +4460,13 @@ fil_ibd_discover(
 	ulint		space_id,
 	Datafile&	df)
 {
-	Datafile	df_def_gen;	/* default general datafile */
 	Datafile	df_def_per;	/* default file-per-table datafile */
-	RemoteDatafile	df_rem_gen;	/* remote general datafile*/
 	RemoteDatafile	df_rem_per;	/* remote file-per-table datafile */
 
 	/* Look for the datafile in the default location. If it is
 	a general tablespace, it will be in the datadir. */
 	const char*	filename = df.filepath();
 	const char*	basename = base_name(filename);
-	df_def_gen.init(basename, 0);
-	df_def_gen.make_filepath(NULL, basename, IBD);
-	if (df_def_gen.open_read_only(false) == DB_SUCCESS
-	    && df_def_gen.validate_for_recovery() == DB_SUCCESS
-	    && df_def_gen.space_id() == space_id) {
-		df.set_filepath(df_def_gen.filepath());
-		df.open_read_only(false);
-		return(true);
-	}
 
 	/* If this datafile is file-per-table it will have a schema dir. */
 	ulint		sep_found = 0;
@@ -4594,39 +4489,7 @@ fil_ibd_discover(
 		}
 	}
 
-	/* Did not find a general or file-per-table datafile in the
-	default location.  Look for a remote general tablespace. */
-	df_rem_gen.set_name(basename);
-	if (df_rem_gen.open_link_file() == DB_SUCCESS) {
-
-		/* An ISL file was found with contents. */
-		if (df_rem_gen.open_read_only(false) != DB_SUCCESS
-		    || df_rem_gen.validate_for_recovery() != DB_SUCCESS) {
-
-			/* Assume that this ISL file is intended to be used.
-			Do not continue looking for another if this file
-			cannot be opened or is not a valid IBD file. */
-			ib::error() << "ISL file '"
-				<< df_rem_gen.link_filepath()
-				<< "' was found but the linked file '"
-				<< df_rem_gen.filepath()
-				<< "' could not be opened or is not correct.";
-			return(false);
-		}
-
-		/* Use this file if it has the space_id from the MLOG
-		record. */
-		if (df_rem_gen.space_id() == space_id) {
-			df.set_filepath(df_rem_gen.filepath());
-			df.open_read_only(false);
-			return(true);
-		}
-
-		/* Since old MLOG records can use the same basename in
-		multiple CREATE/DROP sequences, this ISL file could be
-		pointing to a later version of this basename.ibd file
-		which has a different space_id. Keep looking. */
-	}
+	/* Did not find in the default location. */
 
 	/* Look for a remote file-per-table tablespace. */
 	if (sep_found == 2) {
@@ -4789,11 +4652,17 @@ fil_ibd_load(
 	}
 
 	ut_ad(space == NULL);
+	/* Adjust the memory-based flags that would normally be set by
+	dict_tf_to_fsp_flags(). In recovery, we have no data dictionary. */
+	ulint flags = file.flags();
+	if (FSP_FLAGS_HAS_PAGE_COMPRESSION(flags)) {
+		flags |= page_zip_level
+			<< FSP_FLAGS_MEM_COMPRESSION_LEVEL;
+	}
 
-	bool is_temp = FSP_FLAGS_GET_TEMPORARY(file.flags());
 	space = fil_space_create(
-		file.name(), space_id, file.flags(),
-		is_temp ? FIL_TYPE_TEMPORARY : FIL_TYPE_TABLESPACE,
+		file.name(), space_id, flags,
+		FIL_TYPE_TABLESPACE,
 		file.get_crypt_info(), false);
 
 	if (space == NULL) {
@@ -4811,21 +4680,6 @@ fil_ibd_load(
 				 false, true, false)) {
 		ut_error;
 	}
-
-#ifdef MYSQL_ENCRYPTION
-	/* For encryption tablespace, initial encryption information. */
-	if (FSP_FLAGS_GET_ENCRYPTION(space->flags)
-	    && file.m_encryption_key != NULL) {
-		dberr_t err = fil_set_encryption(space->id,
-						 Encryption::AES,
-						 file.m_encryption_key,
-						 file.m_encryption_iv);
-		if (err != DB_SUCCESS) {
-			ib::error() << "Can't set encryption information for"
-				" tablespace " << space->name << "!";
-		}
-	}
-#endif /* MYSQL_ENCRYPTION */
 
 	return(FIL_LOAD_OK);
 }
@@ -4884,7 +4738,41 @@ fil_report_missing_tablespace(
 		" exists in the InnoDB internal data dictionary.";
 }
 
-/** Returns true if a matching tablespace exists in the InnoDB tablespace
+/** Try to adjust FSP_SPACE_FLAGS if they differ from the expectations.
+(Typically when upgrading from MariaDB 10.1.0..10.1.20.)
+@param[in]	space_id	tablespace ID
+@param[in]	flags		desired tablespace flags */
+UNIV_INTERN
+void
+fsp_flags_try_adjust(ulint space_id, ulint flags)
+{
+	ut_ad(!srv_read_only_mode);
+	ut_ad(fsp_flags_is_valid(flags));
+
+	mtr_t	mtr;
+	mtr_start(&mtr);
+	if (buf_block_t* b = buf_page_get(
+		    page_id_t(space_id, 0), page_size_t(flags),
+		    RW_X_LATCH, &mtr)) {
+		ulint f = fsp_header_get_flags(b->frame);
+		/* Suppress the message if only the DATA_DIR flag to differs. */
+		if ((f ^ flags) & ~(1U << FSP_FLAGS_POS_RESERVED)) {
+			ib::warn()
+				<< "adjusting FSP_SPACE_FLAGS of tablespace "
+				<< space_id
+				<< " from " << ib::hex(f)
+				<< " to " << ib::hex(flags);
+		}
+		if (f != flags) {
+			mlog_write_ulint(FSP_HEADER_OFFSET
+					 + FSP_SPACE_FLAGS + b->frame,
+					 flags, MLOG_4BYTES, &mtr);
+		}
+	}
+	mtr_commit(&mtr);
+}
+
+/** Determine if a matching tablespace exists in the InnoDB tablespace
 memory cache. Note that if we have not done a crash recovery at the database
 startup, there may be many tablespaces which are not yet in the memory cache.
 @param[in]	id		Tablespace ID
@@ -4896,6 +4784,7 @@ error log if a matching tablespace is not found from memory.
 @param[in]	heap		Heap memory
 @param[in]	table_id	table id
 @param[in]	table		table
+@param[in]	table_flags	table flags
 @return true if a matching tablespace exists in the memory cache */
 bool
 fil_space_for_table_exists_in_mem(
@@ -4905,12 +4794,13 @@ fil_space_for_table_exists_in_mem(
 	bool		adjust_space,
 	mem_heap_t*	heap,
 	table_id_t	table_id,
-	dict_table_t*	table)
+	dict_table_t*	table,
+	ulint		table_flags)
 {
-	fil_space_t*	fnamespace = NULL;
+	fil_space_t*	fnamespace;
 	fil_space_t*	space;
 
-	ut_ad(fil_system);
+	const ulint	expected_flags = dict_tf_to_fsp_flags(table_flags);
 
 	mutex_enter(&fil_system->mutex);
 
@@ -4918,80 +4808,41 @@ fil_space_for_table_exists_in_mem(
 
 	space = fil_space_get_by_id(id);
 
-	/* If tablespace contains encryption information
-	copy it also to table. */
-	if (space && space->crypt_data &&
-		table && !table->crypt_data) {
+	/* Look if there is a space with the same name; the name is the
+	directory path from the datadir to the file */
+
+	fnamespace = fil_space_get_by_name(name);
+	bool valid = space && !((space->flags ^ expected_flags)
+				& ~FSP_FLAGS_MEM_MASK);
+
+	if (valid && table && !table->crypt_data) {
 		table->crypt_data = space->crypt_data;
 	}
 
-	if (space != NULL
-	    && FSP_FLAGS_GET_SHARED(space->flags)
-	    && adjust_space
-	    && srv_sys_tablespaces_open
-	    && 0 == strncmp(space->name, general_space_name,
-			    strlen(general_space_name))) {
-		/* This name was assigned during recovery in fil_ibd_load().
-		This general tablespace was opened from an MLOG_FILE_NAME log
-		entry where the tablespace name does not exist.  Replace the
-		temporary name with this name and return this space. */
-		HASH_DELETE(fil_space_t, name_hash, fil_system->name_hash,
-			    ut_fold_string(space->name), space);
-		ut_free(space->name);
-		space->name = mem_strdup(name);
-		HASH_INSERT(fil_space_t, name_hash, fil_system->name_hash,
-			    ut_fold_string(space->name), space);
-
-		mutex_exit(&fil_system->mutex);
-
-		return(true);
-	}
-
-	if (space != NULL) {
-		if (FSP_FLAGS_GET_SHARED(space->flags)
-		    && !srv_sys_tablespaces_open) {
-
-			/* No need to check the name */
-			mutex_exit(&fil_system->mutex);
-			return(true);
-		}
-
-		/* If this space has the expected name, use it. */
-		fnamespace = fil_space_get_by_name(name);
-		if (space == fnamespace) {
-			/* Found */
-
-			mutex_exit(&fil_system->mutex);
-			return(true);
-		}
-	}
-
-	/* Info from "fnamespace" comes from the ibd file itself, it can
-	be different from data obtained from System tables since file
-	operations are not transactional. If adjust_space is set, and the
-	mismatching space are between a user table and its temp table, we
-	shall adjust the ibd file name according to system table info */
-	if (adjust_space
-	    && space != NULL
-	    && row_is_mysql_tmp_table_name(space->name)
-	    && !row_is_mysql_tmp_table_name(name)) {
-
+	if (!space) {
+	} else if (!valid || space == fnamespace) {
+		/* Found with the same file name, or got a flag mismatch. */
+		goto func_exit;
+	} else if (adjust_space
+		   && row_is_mysql_tmp_table_name(space->name)
+		   && !row_is_mysql_tmp_table_name(name)) {
+		/* Info from fnamespace comes from the ibd file
+		itself, it can be different from data obtained from
+		System tables since renaming files is not
+		transactional. We shall adjust the ibd file name
+		according to system table info. */
 		mutex_exit(&fil_system->mutex);
 
 		DBUG_EXECUTE_IF("ib_crash_before_adjust_fil_space",
 				DBUG_SUICIDE(););
 
-		if (fnamespace) {
-			const char*	tmp_name;
+		const char*	tmp_name = dict_mem_create_temporary_tablename(
+			heap, name, table_id);
 
-			tmp_name = dict_mem_create_temporary_tablename(
-				heap, name, table_id);
-
-			fil_rename_tablespace(
-				fnamespace->id,
-				UT_LIST_GET_FIRST(fnamespace->chain)->name,
-				tmp_name, NULL);
-		}
+		fil_rename_tablespace(
+			fnamespace->id,
+			UT_LIST_GET_FIRST(fnamespace->chain)->name,
+			tmp_name, NULL);
 
 		DBUG_EXECUTE_IF("ib_crash_after_adjust_one_fil_space",
 				DBUG_SUICIDE(););
@@ -5006,16 +4857,12 @@ fil_space_for_table_exists_in_mem(
 		mutex_enter(&fil_system->mutex);
 		fnamespace = fil_space_get_by_name(name);
 		ut_ad(space == fnamespace);
-		mutex_exit(&fil_system->mutex);
-
-		return(true);
+		goto func_exit;
 	}
 
 	if (!print_error_if_does_not_exist) {
-
-		mutex_exit(&fil_system->mutex);
-
-		return(false);
+		valid = false;
+		goto func_exit;
 	}
 
 	if (space == NULL) {
@@ -5034,10 +4881,8 @@ fil_space_for_table_exists_in_mem(
 		}
 error_exit:
 		ib::warn() << TROUBLESHOOT_DATADICT_MSG;
-
-		mutex_exit(&fil_system->mutex);
-
-		return(false);
+		valid = false;
+		goto func_exit;
 	}
 
 	if (0 != strcmp(space->name, name)) {
@@ -5056,9 +4901,19 @@ error_exit:
 		goto error_exit;
 	}
 
+func_exit:
+	if (valid) {
+		/* Adjust the flags that are in FSP_FLAGS_MEM_MASK.
+		FSP_SPACE_FLAGS will not be written back here. */
+		space->flags = expected_flags;
+	}
 	mutex_exit(&fil_system->mutex);
 
-	return(false);
+	if (valid && !srv_read_only_mode) {
+		fsp_flags_try_adjust(id, expected_flags & ~FSP_FLAGS_MEM_MASK);
+	}
+
+	return(valid);
 }
 
 /** Return the space ID based on the tablespace name.
@@ -6850,15 +6705,12 @@ truncate_t::truncate(
 {
 	dberr_t		err = DB_SUCCESS;
 	char*		path;
-	bool		has_data_dir = FSP_FLAGS_HAS_DATA_DIR(flags);
 
 	ut_a(!is_system_tablespace(space_id));
 
-	if (has_data_dir) {
+	if (FSP_FLAGS_HAS_DATA_DIR(flags)) {
 		ut_ad(dir_path != NULL);
-
 		path = fil_make_filepath(dir_path, tablename, IBD, true);
-
 	} else {
 		path = fil_make_filepath(NULL, tablename, IBD, false);
 	}
@@ -7369,10 +7221,8 @@ fil_space_get_crypt_data(
 			byte *page = static_cast<byte*>(ut_align(buf, UNIV_PAGE_SIZE));
 			fil_read(page_id_t(space_id, 0), univ_page_size, 0, univ_page_size.physical(),
 				 page);
-			ulint flags = fsp_header_get_flags(page);
 			ulint offset = FSP_HEADER_OFFSET
-				+ fsp_header_get_encryption_offset(
-					page_size_t(flags));
+				+ fsp_header_get_encryption_offset(page_size_t(space->flags));
 			space->crypt_data = fil_space_read_crypt_data(space_id, page, offset);
 			ut_free(buf);
 

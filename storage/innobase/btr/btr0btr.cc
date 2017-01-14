@@ -298,7 +298,6 @@ btr_root_adjust_on_import(
 /*======================*/
 	const dict_index_t*	index)	/*!< in: index tree */
 {
-	dberr_t			err;
 	mtr_t			mtr;
 	page_t*			page;
 	buf_block_t*		block;
@@ -320,48 +319,18 @@ btr_root_adjust_on_import(
 	page = buf_block_get_frame(block);
 	page_zip = buf_block_get_page_zip(block);
 
-	if (!page_is_root(page)) {
-
-		err = DB_CORRUPTION;
-
-	} else if (dict_index_is_clust(index)) {
-		bool	page_is_compact_format;
-
-		page_is_compact_format = page_is_comp(page) > 0;
-
-		/* Check if the page format and table format agree. */
-		if (page_is_compact_format != dict_table_is_comp(table)) {
-			err = DB_CORRUPTION;
-		} else {
-			/* Check that the table flags and the tablespace
-			flags match. */
-			ulint	flags = dict_tf_to_fsp_flags(
-				table->flags,
-				false,
-				dict_table_is_encrypted(table));
-			ulint	fsp_flags = fil_space_get_flags(table->space);
-			err = fsp_flags_are_equal(flags, fsp_flags)
-			      ? DB_SUCCESS : DB_CORRUPTION;
-		}
-	} else {
-		err = DB_SUCCESS;
-	}
-
-	/* Check and adjust the file segment headers, if all OK so far. */
-	if (err == DB_SUCCESS
-	    && (!btr_root_fseg_adjust_on_import(
+	const bool fail = !page_is_root(page)
+		|| !!page_is_comp(page) != dict_table_is_comp(table)
+		|| !btr_root_fseg_adjust_on_import(
 			FIL_PAGE_DATA + PAGE_BTR_SEG_LEAF
 			+ page, page_zip, space_id, &mtr)
 		|| !btr_root_fseg_adjust_on_import(
 			FIL_PAGE_DATA + PAGE_BTR_SEG_TOP
-			+ page, page_zip, space_id, &mtr))) {
-
-		err = DB_CORRUPTION;
-	}
+			+ page, page_zip, space_id, &mtr);
 
 	mtr_commit(&mtr);
 
-	return(err);
+	return(fail ? DB_CORRUPTION : DB_SUCCESS);
 }
 
 /**************************************************************//**

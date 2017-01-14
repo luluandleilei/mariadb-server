@@ -133,7 +133,8 @@ struct fil_space_t {
 				/*!< recovered tablespace size in pages;
 				0 if no size change was read from the redo log,
 				or if the size change was implemented */
-	ulint		flags;	/*!< tablespace flags; see
+	ulint		flags;	/*!< FSP_SPACE_FLAGS and FSP_FLAGS_MEM_ flags;
+				see fsp0types.h,
 				fsp_flags_is_valid(),
 				page_size_t(ulint) (constructor) */
 	ulint		n_reserved_extents;
@@ -1090,7 +1091,7 @@ fil_make_filepath(
 @param[in]	name		Tablespace name in dbname/tablename format.
 For general tablespaces, the 'dbname/' part may be missing.
 @param[in]	path		Path and filename of the datafile to create.
-@param[in]	flags		Tablespace flags
+@param[in]	flags		FSP_SPACE_FLAGS
 @param[in]	size		Initial size of the tablespace file in pages,
 must be >= FIL_IBD_FILE_INITIAL_SIZE
 @return DB_SUCCESS or error code */
@@ -1129,7 +1130,7 @@ statement to update the dictionary tables if they are incorrect.
 @param[in]	fix_dict	true if the dictionary is available to be fixed
 @param[in]	purpose		FIL_TYPE_TABLESPACE or FIL_TYPE_TEMPORARY
 @param[in]	id		tablespace ID
-@param[in]	flags		tablespace flags
+@param[in]	flags		expected FSP_SPACE_FLAGS
 @param[in]	space_name	tablespace name of the datafile
 If file-per-table, it is the table name in the databasename/tablename format
 @param[in]	path_in		expected filepath, usually read from dictionary
@@ -1185,27 +1186,38 @@ fil_file_readdir_next_file(
 	os_file_dir_t	dir,	/*!< in: directory stream */
 	os_file_stat_t*	info);	/*!< in/out: buffer where the
 				info is returned */
-/*******************************************************************//**
-Returns true if a matching tablespace exists in the InnoDB tablespace memory
-cache. Note that if we have not done a crash recovery at the database startup,
-there may be many tablespaces which are not yet in the memory cache.
+/** Try to adjust FSP_SPACE_FLAGS if they differ from the expectations.
+(Typically when upgrading from MariaDB 10.1.0..10.1.20.)
+@param[in]	space_id	tablespace ID
+@param[in]	flags		desired tablespace flags */
+UNIV_INTERN
+void
+fsp_flags_try_adjust(ulint space_id, ulint flags);
+/** Determine if a matching tablespace exists in the InnoDB tablespace
+memory cache. Note that if we have not done a crash recovery at the database
+startup, there may be many tablespaces which are not yet in the memory cache.
+@param[in]	id		Tablespace ID
+@param[in]	name		Tablespace name used in fil_space_create().
+@param[in]	print_error_if_does_not_exist
+				Print detailed error information to the
+error log if a matching tablespace is not found from memory.
+@param[in]	adjust_space	Whether to adjust space id on mismatch
+@param[in]	heap		Heap memory
+@param[in]	table_id	table id
+@param[in]	table		table
+@param[in]	table_flags	table flags
 @return true if a matching tablespace exists in the memory cache */
 bool
 fil_space_for_table_exists_in_mem(
-/*==============================*/
-	ulint		id,		/*!< in: space id */
-	const char*	name,		/*!< in: table name in the standard
-					'databasename/tablename' format */
+	ulint		id,
+	const char*	name,
 	bool		print_error_if_does_not_exist,
-					/*!< in: print detailed error
-					information to the .err log if a
-					matching tablespace is not found from
-					memory */
-	bool		adjust_space,	/*!< in: whether to adjust space id
-					when find table space mismatch */
-	mem_heap_t*	heap,		/*!< in: heap memory */
-	table_id_t	table_id,	/*!< in: table id */
-	dict_table_t*	table);		/*!< in: table or NULL */
+	bool		adjust_space,
+	mem_heap_t*	heap,
+	table_id_t	table_id,
+	dict_table_t*	table,
+	ulint		table_flags)
+	MY_ATTRIBUTE((warn_unused_result));
 
 /** Try to extend a tablespace if it is smaller than the specified size.
 @param[in,out]	space	tablespace
@@ -1464,10 +1476,6 @@ struct PageCallback {
 	/**
 	@return the space id of the tablespace */
 	virtual ulint get_space_id() const UNIV_NOTHROW = 0;
-
-	/**
-	@retval the space flags of the tablespace being iterated over */
-	virtual ulint get_space_flags() const UNIV_NOTHROW = 0;
 
 	/** Set the tablespace table size.
 	@param[in] page a page belonging to the tablespace */

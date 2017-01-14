@@ -1,6 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2013, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -2221,10 +2222,6 @@ truncate_t::fixup_tables_in_non_system_tablespace()
 		/* Step-1: Drop tablespace (only for single-tablespace),
 		drop indexes and re-create indexes. */
 
-		if (fsp_is_file_per_table((*it)->m_space_id,
-					  (*it)->m_tablespace_flags)) {
-			/* The table is file_per_table */
-
 			ib::info() << "Completing truncate for table with "
 				"id (" << (*it)->m_old_table_id << ") "
 				"residing in file-per-table tablespace with "
@@ -2268,25 +2265,6 @@ truncate_t::fixup_tables_in_non_system_tablespace()
 				(*it)->m_tablespace_flags,
 				(*it)->m_tablename,
 				**it, log_get_lsn());
-
-		} else {
-			/* Table is in a shared tablespace */
-
-			ib::info() << "Completing truncate for table with "
-				"id (" << (*it)->m_old_table_id << ") "
-				"residing in shared tablespace with "
-				"id (" << (*it)->m_space_id << ")";
-
-			/* Temp-tables in temp-tablespace are never restored.*/
-			ut_ad((*it)->m_space_id != SRV_TMP_SPACE_ID);
-
-			err = fil_recreate_table(
-				(*it)->m_space_id,
-				(*it)->m_format_flags,
-				(*it)->m_tablespace_flags,
-				(*it)->m_tablename,
-				**it);
-		}
 
 		/* Step-2: Update the SYS_XXXX tables to reflect new
 		table-id and root_page_no. */

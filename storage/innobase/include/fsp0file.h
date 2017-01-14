@@ -1,6 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2013, 2016, Oracle and/or its affiliates. All Rights Reserved.
+Copyright (c) 2017, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -228,25 +229,20 @@ public:
 	void set_filepath(const char* filepath);
 
 	/** Allocate and set the datafile or tablespace name in m_name.
-	If a name is provided, use it; else if the datafile is file-per-table,
-	extract a file-per-table tablespace name from m_filepath; else it is a
-	general tablespace, so just call it that for now. The value of m_name
-	will be freed in the destructor.
+	If a name is provided, use it; else the datafile is file-per-table,
+	extract a file-per-table tablespace name from m_filepath.
+	The value of m_name will be freed in the destructor.
 	@param[in]	name	Tablespace Name if known, NULL if not */
 	void set_name(const char*	name);
 
 	/** Validates the datafile and checks that it conforms with
 	the expected space ID and flags.  The file should exist and be
 	successfully opened in order for this function to validate it.
-	@param[in]	space_id	The expected tablespace ID.
-	@param[in]	flags		The expected tablespace flags.
-	@param[in]	for_import	is it for importing
+	@param[in]	space_id	expected tablespace ID
+	@param[in]	flags		expected FSP_SPACE_FLAGS
 	@retval DB_SUCCESS if tablespace is valid, DB_ERROR if not.
 	m_is_valid is also set true on success, else false. */
-	dberr_t validate_to_dd(
-		ulint		space_id,
-		ulint		flags,
-		bool		for_import)
+	dberr_t validate_to_dd(ulint space_id, ulint flags)
 		MY_ATTRIBUTE((warn_unused_result));
 
 	/** Validates this datafile for the purpose of recovery.
@@ -265,13 +261,10 @@ public:
 	so the Space ID found here must not already be open.
 	m_is_valid is set true on success, else false.
 	@param[out]	flush_lsn	contents of FIL_PAGE_FILE_FLUSH_LSN
-	@param[in]	for_import	if it is for importing
-	(only valid for the first file of the system tablespace)
 	@retval DB_SUCCESS on if the datafile is valid
 	@retval DB_CORRUPTION if the datafile is not readable
 	@retval DB_TABLESPACE_EXISTS if there is a duplicate space_id */
-	dberr_t validate_first_page(lsn_t*	flush_lsn,
-				    bool	for_import)
+	dberr_t validate_first_page(lsn_t* flush_lsn)
 		MY_ATTRIBUTE((warn_unused_result));
 
 	/** Get Datafile::m_name.
@@ -573,13 +566,10 @@ public:
 	the path ".".
 	@param[in]	name		tablespace name
 	@param[in]	filepath	remote filepath of tablespace datafile
-	@param[in]	is_shared	true for general tablespace,
-					false for file-per-table
 	@return DB_SUCCESS or error code */
 	static dberr_t create_link_file(
 		const char*	name,
-		const char*	filepath,
-		bool		is_shared = false);
+		const char*	filepath);
 
 	/** Delete an InnoDB Symbolic Link (ISL) file by name.
 	@param[in]	name	tablespace name */

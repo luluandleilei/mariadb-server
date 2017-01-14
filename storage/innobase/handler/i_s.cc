@@ -1,7 +1,7 @@
 /*****************************************************************************
 
 Copyright (c) 2007, 2016, Oracle and/or its affiliates.
-Copyrigth (c) 2014, 2016, MariaDB Corporation
+Copyright (c) 2014, 2017, MariaDB Corporation.
 
 This program is free software; you can redistribute it and/or modify it under
 the terms of the GNU General Public License as published by the Free Software
@@ -8326,9 +8326,6 @@ i_s_dict_fill_sys_tablespaces(
 	file_format = trx_sys_file_format_id_to_name(atomic_blobs);
 	if (is_system_tablespace(space)) {
 		row_format = "Compact or Redundant";
-	} else if (fsp_is_shared_tablespace(flags) && !is_compressed) {
-		file_format = "Any";
-		row_format = "Any";
 	} else if (is_compressed) {
 		row_format = "Compressed";
 	} else if (atomic_blobs) {
@@ -8339,8 +8336,6 @@ i_s_dict_fill_sys_tablespaces(
 
 	if (is_system_tablespace(space)) {
 		space_type = "System";
-	} else if (fsp_is_shared_tablespace(flags)) {
-		space_type = "General";
 	} else  {
 		space_type = "Single";
 	}
@@ -8370,8 +8365,7 @@ i_s_dict_fill_sys_tablespaces(
 			      space_type));
 
 	char*	filepath = NULL;
-	if (FSP_FLAGS_HAS_DATA_DIR(flags)
-	    || FSP_FLAGS_GET_SHARED(flags)) {
+	if (FSP_FLAGS_HAS_DATA_DIR(flags)) {
 		mutex_enter(&dict_sys->mutex);
 		filepath = dict_get_first_path(space);
 		mutex_exit(&dict_sys->mutex);

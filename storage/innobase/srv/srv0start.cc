@@ -446,8 +446,7 @@ create_log_files(
 	/* Disable the doublewrite buffer for log files, not required */
 
 	fil_space_t*	log_space = fil_space_create(
-		"innodb_redo_log", SRV_LOG_SPACE_FIRST_ID,
-		fsp_flags_set_page_size(0, univ_page_size),
+		"innodb_redo_log", SRV_LOG_SPACE_FIRST_ID, 0,
 		FIL_TYPE_LOG,
 		NULL, /* No encryption yet */
 		true /* this is create */);
@@ -645,7 +644,6 @@ srv_undo_tablespace_open(
 {
 	os_file_t	fh;
 	bool		ret;
-	ulint		flags;
 	dberr_t		err	= DB_ERROR;
 	char		undo_name[sizeof "innodb_undo000"];
 
@@ -690,11 +688,11 @@ srv_undo_tablespace_open(
 
 		fil_set_max_space_id_if_bigger(space_id);
 
-		/* Set the compressed page size to 0 (non-compressed) */
-		flags = fsp_flags_init(
-			univ_page_size, false, false, false, false, false, 0, 0);
 		space = fil_space_create(
-			undo_name, space_id, flags, FIL_TYPE_TABLESPACE, NULL, true);
+			undo_name, space_id,
+			FSP_FLAGS_PAGE_SSIZE(), FIL_TYPE_TABLESPACE,
+			NULL /* no encryption */,
+			true /* create */);
 
 		ut_a(fil_validate());
 		ut_a(space);
@@ -2043,9 +2041,7 @@ innobase_start_or_create_for_mysql(void)
 		/* Disable the doublewrite buffer for log files. */
 		fil_space_t*	log_space = fil_space_create(
 			"innodb_redo_log",
-			SRV_LOG_SPACE_FIRST_ID,
-			fsp_flags_set_page_size(0, univ_page_size),
-			FIL_TYPE_LOG,
+			SRV_LOG_SPACE_FIRST_ID, 0, FIL_TYPE_LOG,
 			NULL /* no encryption yet */,
 			true /* create */);
 
@@ -2444,6 +2440,13 @@ files_checked:
 	srv_startup_is_before_trx_rollback_phase = false;
 
 	if (!srv_read_only_mode) {
+		const ulint flags = FSP_FLAGS_PAGE_SSIZE();
+		for (ulint id = 0; id <= srv_undo_tablespaces; id++) {
+			if (fil_space_get(id)) {
+				fsp_flags_try_adjust(id, flags);
+			}
+		}
+
 		/* Create the thread which watches the timeouts
 		for lock waits */
 		thread_handles[2 + SRV_MAX_N_IO_THREADS] = os_thread_create(
@@ -2960,39 +2963,6 @@ srv_get_meta_data_filename(
 			table->data_dir_path, table->name.m_name, CFG, true);
 	} else {
 		path = fil_make_filepath(NULL, table->name.m_name, CFG, false);
-	}
-
-	ut_a(path);
-	len = ut_strlen(path);
-	ut_a(max_len >= len);
-
-	strcpy(filename, path);
-
-	ut_free(path);
-}
-/** Get the encryption-data filename from the table name for a
-single-table tablespace.
-@param[in]	table		table object
-@param[out]	filename	filename
-@param[in]	max_len		filename max length */
-void
-srv_get_encryption_data_filename(
-	dict_table_t*	table,
-	char*		filename,
-	ulint		max_len)
-{
-	ulint		len;
-	char*		path;
-	/* Make sure the data_dir_path is set. */
-	dict_get_and_save_data_dir_path(table, false);
-
-	if (DICT_TF_HAS_DATA_DIR(table->flags)) {
-		ut_a(table->data_dir_path);
-
-		path = fil_make_filepath(
-			table->data_dir_path, table->name.m_name, CFP, true);
-	} else {
-		path = fil_make_filepath(NULL, table->name.m_name, CFP, false);
 	}
 
 	ut_a(path);

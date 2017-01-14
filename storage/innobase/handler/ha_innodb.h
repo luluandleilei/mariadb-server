@@ -792,9 +792,6 @@ public:
 	/** Validate DATA DIRECTORY option. */
 	bool create_option_data_directory_is_valid();
 
-	/** Validate TABLESPACE option. */
-	bool create_option_tablespace_is_valid();
-
 	/** Validate COMPRESSION option. */
 	bool create_option_compression_is_valid();
 

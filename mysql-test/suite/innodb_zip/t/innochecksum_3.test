@@ -163,7 +163,7 @@ foreach (glob("$ENV{MYSQLD_DATADIR}/*/*.ibd")) {
 }
 EOF
 
-let $restart_parameters = restart: --innodb_checksum_algorithm=strict_none --default_storage_engine=InnoDB;
+let $restart_parameters = --innodb_checksum_algorithm=strict_none --default_storage_engine=InnoDB;
 --source include/start_mysqld.inc
 
 # check the table status is GOOD with DML
