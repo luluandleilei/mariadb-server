@@ -435,10 +435,10 @@ xdes_get_descriptor_with_space_hdr(
 	ulint	size;
 	ulint	descr_page_no;
 	page_t*	descr_page;
-#ifdef UNIV_DEBUG
+
+	// FIXME: Take fil_space_t* as a parameter!
 	const fil_space_t*	fspace = fil_space_get(space);
-	ut_ad(fspace != NULL);
-#endif /* UNIV_DEBUG */
+	ut_a(fspace != NULL);
 	ut_ad(mtr_memo_contains(mtr, &fspace->latch, MTR_MEMO_X_LOCK));
 	ut_ad(mtr_memo_contains_page(mtr, sp_header, MTR_MEMO_PAGE_SX_FIX));
 	ut_ad(page_offset(sp_header) == FSP_HEADER_OFFSET);
